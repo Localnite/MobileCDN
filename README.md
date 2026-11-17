@@ -28,5 +28,7 @@ AI was wholly used for the creation of this server.
 
 Models used:
 
+```
 Claude Opus 5.5 (Claude Code)
 Hy4 Flash (OpenCode)
+```
