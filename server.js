@@ -174,13 +174,15 @@ async function buildChunk(chunk, guid) {
     return Buffer.concat([header, body]);
 }
 
-// The chunk rebuilder. Indexes every build under buildsDir once at startup and reconstructs chunks on demand.
+// The chunk source. Indexes every build under buildsDir once at startup; serves .chunk files found on disk
+// directly, and otherwise reconstructs chunks on demand from the archived build's files.
 // Kept here for now, but self-contained so it can become a separate component later.
-function createRebuilder(buildsDir) {
+function createChunkSource(buildsDir) {
     const chunks = new Map();   // "<GUID>_<rolling hash>" -> { hash, sha, parts }
     const origins = new Map();  // same key -> build it was indexed from (a chunk can span several files in one build)
+    const direct = new Map();   // same key -> absolute path of a .chunk file found on disk
 
-    function findManifests(dir, found = []) {
+    function findFiles(dir, suffix, found = []) {
         let entries;
         try {
             entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -190,13 +192,14 @@ function createRebuilder(buildsDir) {
         }
         for (const entry of entries) {
             const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) findManifests(full, found);
-            else if (entry.name.endsWith(".manifest")) found.push(full);
+            if (entry.isDirectory()) findFiles(full, suffix, found);
+            else if (entry.name.toLowerCase().endsWith(suffix)) found.push(full);
         }
         return found;
     }
 
-    const manifests = findManifests(path.resolve(buildsDir));
+    const root = path.resolve(buildsDir);
+    const manifests = findFiles(root, ".manifest");
     let indexed = 0;
 
     for (const manifestFile of manifests) {
@@ -232,21 +235,44 @@ function createRebuilder(buildsDir) {
         }
     }
 
-    console.log(`rebuilder: indexed ${indexed}/${manifests.length} build(s), ${chunks.size} chunks`);
+    for (const file of findFiles(root, ".chunk")) {
+        const m = /^([0-9A-F]{16})_([0-9A-F]{32})\.chunk$/i.exec(path.basename(file));
+        if (m) direct.set(m[2].toUpperCase() + "_" + m[1].toUpperCase(), file);
+    }
+    console.log(`chunk source: ${indexed}/${manifests.length} build(s), ${chunks.size} rebuildable chunks, ${direct.size} chunk files on disk`);
 
     return {
-        async chunk(guid, hashHex) {
+        direct(guid, hashHex) {
+            return direct.get(guid.toUpperCase() + "_" + hashHex.toUpperCase()) || null;
+        },
+        async rebuild(guid, hashHex) {
             const chunk = chunks.get(guid.toUpperCase() + "_" + hashHex.toUpperCase());
             return chunk ? buildChunk(chunk, guid.toUpperCase()) : null;
         }
     };
 }
 
-const rebuilder = createRebuilder(config.buildsDir);
+const source = createChunkSource(config.buildsDir);
 
 function send(res, status, body, headers = {}) {
     res.writeHead(status, Object.assign({ "Content-Length": body ? body.length : 0 }, headers));
     res.end(body);
+}
+
+function sendFile(res, file, headOnly) {
+    const stat = fs.statSync(file);
+    res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": stat.size,
+        "Cache-Control": "public, max-age=31536000, immutable"
+    });
+    if (headOnly) return res.end();
+    const stream = fs.createReadStream(file);
+    stream.on("error", err => {
+        console.log(`reading ${file} failed: ${err.message}`);
+        res.end();
+    });
+    stream.pipe(res);
 }
 
 async function handle(req, res) {
@@ -259,8 +285,18 @@ async function handle(req, res) {
     const isChunk = CHUNK_PATH.exec(url.slice(PREFIX.length));
     if (!isChunk) return send(res, 404);
 
+    const file = source.direct(isChunk[2], isChunk[1]);
+    if (file) {
+        try {
+            return sendFile(res, file, req.method === "HEAD");
+        } catch (err) {
+            console.log(`serving ${file} failed: ${err.message}`);
+            return send(res, 500);
+        }
+    }
+
     try {
-        const blob = await rebuilder.chunk(isChunk[2], isChunk[1]);
+        const blob = await source.rebuild(isChunk[2], isChunk[1]);
         if (!blob) return send(res, 404);
         send(res, 200, req.method === "HEAD" ? null : blob, {
             "Content-Type": "application/octet-stream",

@@ -6,6 +6,8 @@ Run: `node server.js` (env overrides: `CDN_PORT`, `CDN_BUILDS_DIR`, `CDN_CONFIG`
 
 Add a build: drop its folder (manifest + `files/`) under `buildsDir` and restart the CDN, the index is built once at startup.
 
+Chunks are rebuilt from the paks on demand. To serve prebuilt chunks instead, put `<hash>_<GUID>.chunk` files anywhere under `buildsDir` (e.g. a `ChunksV4/<group>/` folder) — those are streamed directly and take priority over rebuilding.
+
 Expected `buildsDir` structure (one build per platform shown):
 ```
 buildsDir/
